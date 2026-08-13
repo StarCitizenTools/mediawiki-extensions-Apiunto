@@ -255,6 +255,95 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 		$this->assertSame( 'Bearer secret', $headers[1]['Authorization'] ?? null );
 	}
 
+	/**
+	 * Seeds a logically-stale but physically-retained value, so getWithSetCallback
+	 * runs the regeneration callback while the old value is still readable.
+	 */
+	private function seedStale( WANObjectCache $cache, AbstractRepository $repo, float &$mockTime ): void {
+		$cache->set( $repo->makeCacheKey(), 'stale-but-served', 10, [ 'staleTTL' => 3600 ] );
+		$mockTime += 20;
+	}
+
+	/**
+	 * The regression this guards. MWHttpRequest reports a 429, 5xx or timeout as a
+	 * non-OK Status rather than throwing, so a fallback guarded on catch alone never
+	 * ran for the very failures it exists to cover.
+	 */
+	public function testServesStaleWhenHttpFailsWithoutThrowing(): void {
+		$mockTime = microtime( true );
+		$cache = new WANObjectCache( [ 'cache' => new HashBagOStuff() ] );
+		$cache->setMockTime( $mockTime );
+
+		$repo = $this->newRepo(
+			[ 'baseUrl' => 'https://api.example' ],
+			[
+				ApiuntoLuaLibrary::IDENTIFIER => 'Aurora',
+				ApiuntoLuaLibrary::QUERY_PARAMS => [],
+			],
+			$this->newRequestFactory( false, '' ),
+			$cache,
+			true
+		);
+
+		$this->seedStale( $cache, $repo, $mockTime );
+
+		$raw = null;
+		$this->expectPHPError(
+			E_USER_WARNING,
+			static function () use ( $repo, &$raw ) {
+				$raw = $repo->getRaw();
+			}
+		);
+
+		$this->assertSame( 'stale-but-served', $raw );
+	}
+
+	/**
+	 * Stale content must not be written back. Re-storing it under a fresh TTL would
+	 * stop the upstream being retried for another full cacheDuration, so a brief
+	 * outage would become a long stale window.
+	 */
+	public function testStaleContentIsNotWrittenBackToCache(): void {
+		$mockTime = microtime( true );
+		$cache = new WANObjectCache( [ 'cache' => new HashBagOStuff() ] );
+		$cache->setMockTime( $mockTime );
+
+		$status = $this->createMock( \StatusValue::class );
+		$status->method( 'isOK' )->willReturn( false );
+		$req = $this->createMock( \MWHttpRequest::class );
+		$req->method( 'execute' )->willReturn( $status );
+
+		$factory = $this->createMock( HttpRequestFactory::class );
+		// Both calls must reach the network. Had the stale value been re-stored, the
+		// second would be a cache hit and never call create().
+		$factory->expects( $this->exactly( 2 ) )->method( 'create' )->willReturn( $req );
+
+		$repo = $this->newRepo(
+			[ 'baseUrl' => 'https://api.example' ],
+			[
+				ApiuntoLuaLibrary::IDENTIFIER => 'Aurora',
+				ApiuntoLuaLibrary::QUERY_PARAMS => [],
+			],
+			$factory,
+			$cache,
+			true
+		);
+
+		$this->seedStale( $cache, $repo, $mockTime );
+
+		$results = [];
+		foreach ( [ 0, 1 ] as $_ ) {
+			$this->expectPHPError(
+				E_USER_WARNING,
+				static function () use ( $repo, &$results ) {
+					$results[] = $repo->getRaw();
+				}
+			);
+		}
+
+		$this->assertSame( [ 'stale-but-served', 'stale-but-served' ], $results );
+	}
+
 	public function testRequestWithCacheDisabledHitsApiDirectly(): void {
 		$repo = $this->newRepo(
 			[ 'baseUrl' => 'https://api.example' ],

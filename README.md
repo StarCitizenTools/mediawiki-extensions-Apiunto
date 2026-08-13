@@ -84,6 +84,12 @@ cached under the *requested* URL, not the resolved one.
 
 Each response is cached for its source's `cacheDuration`. Purging a page (`action=purge`) clears the Apiunto responses cached for it, and a page's information page (`action=info`) shows the current cache status, URL, and time remaining.
 
+A failed fetch is never cached, so an upstream blip costs one request rather than a
+`cacheDuration` of errors. When a fetch fails and a previous response is still held
+in the cache, that stale response is served instead of an error — and is deliberately
+not written back, so the next request retries upstream rather than extending the stale
+window by another full `cacheDuration`.
+
 To purge the entire cache from the command line:
 
 ```sh

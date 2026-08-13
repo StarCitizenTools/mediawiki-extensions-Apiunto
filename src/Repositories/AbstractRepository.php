@@ -33,32 +33,29 @@ abstract class AbstractRepository {
 	protected function request(): string {
 		$cacheMiss = false;
 		$caller = __METHOD__;
-		$callback = function () use ( &$cacheMiss, $caller ) {
+		$callback = function ( $oldValue, &$ttl ) use ( &$cacheMiss, $caller ) {
 			$cacheMiss = true;
 			wfDebugLog( 'Apiunto', 'Retrieving Data from API' );
 
 			try {
-				return $this->fetch( $caller );
+				$content = $this->fetch( $caller );
 			} catch ( Exception $e ) {
 				wfLogWarning( sprintf( '[Apiunto] Error retrieving API data: %s', $e->getMessage() ) );
 				wfDebugLog( 'Apiunto', sprintf( 'Error retrieving API data: %s', $e->getMessage() ) );
-
-				$key = $this->makeCacheKey();
-				$stale = $this->cache->get( $key );
-
-				if ( $stale !== false ) {
-					wfLogWarning( sprintf( '[Apiunto] Returning stale content for key %s', $key ) );
-					wfDebugLog( 'Apiunto', sprintf( 'Returning stale content for key %s', $key ) );
-					return $stale;
-				}
-
-				return false;
+				$content = false;
 			}
+
+			if ( $content !== false ) {
+				return $content;
+			}
+
+			return $this->serveStale( $oldValue, $ttl );
 		};
 
 		if ( $this->config->get( 'ApiuntoEnableCache' ) !== true ) {
 			wfDebugLog( 'Apiunto', 'Object cache is disabled' );
-			return (string)$callback();
+			$discardedTtl = 0;
+			return (string)$callback( false, $discardedTtl );
 		}
 
 		$key = $this->makeCacheKey();
@@ -78,6 +75,37 @@ abstract class AbstractRepository {
 		}
 
 		return (string)$value;
+	}
+
+	/**
+	 * Last resort when a fetch fails: hand back the response cached from a previous
+	 * run, if WANObjectCache still has one.
+	 *
+	 * This runs for *any* failure, not just a thrown one. MWHttpRequest reports a
+	 * timeout, connection refusal, DNS failure, 429 or 5xx as a non-OK Status rather
+	 * than an exception (GuzzleHttpRequest::execute() catches every GuzzleException
+	 * and calls Status::fatal), so guarding the fallback on catch alone left it
+	 * unreachable for the very cases it exists to cover.
+	 *
+	 * @param string|false $oldValue Value WANObjectCache is regenerating over.
+	 * @param int|float &$ttl Set to TTL_UNCACHEABLE when stale content is served.
+	 * @return string|false
+	 */
+	private function serveStale( $oldValue, &$ttl ) {
+		if ( $oldValue === false ) {
+			return false;
+		}
+
+		// Do not write the stale value back. Re-storing it under a fresh TTL would
+		// stop the upstream being retried for another full cacheDuration, turning a
+		// brief outage into a long stale window. Leaving the entry untouched means
+		// the next request tries again.
+		$ttl = WANObjectCache::TTL_UNCACHEABLE;
+
+		wfLogWarning( sprintf( '[Apiunto] Returning stale content for key %s', $this->makeCacheKey() ) );
+		wfDebugLog( 'Apiunto', sprintf( 'Returning stale content for key %s', $this->makeCacheKey() ) );
+
+		return $oldValue;
 	}
 
 	/**
