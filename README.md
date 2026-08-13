@@ -23,6 +23,7 @@ $wgApiuntoSources = [
         'token' => '', // optional
         'timeout' => 5, // optional, default 5
         'cacheDuration' => 3600, // optional, default 86400
+        'followRedirects' => false, // optional, default false
     ],
 ];
 ```
@@ -58,8 +59,21 @@ local ships = api.fetch( 'StarCitizenWikiAPI', 'v2/vehicles', {
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `$wgApiuntoSources` | `[]` | An array of API sources. Each source accepts `baseUrl`, and optional `token`, `timeout` (seconds, default `5`), and `cacheDuration` (seconds, default `86400`). |
+| `$wgApiuntoSources` | `[]` | An array of API sources. Each source accepts `baseUrl`, and optional `token`, `timeout` (seconds, default `5`), `cacheDuration` (seconds, default `86400`), and `followRedirects` (default `false`). |
 | `$wgApiuntoEnableCache` | `true` | Whether to cache API responses. |
+
+### Following redirects
+
+By default a redirect response is returned as-is, so a `3xx` reaches Lua as the
+upstream's redirect body rather than the record it points at. Set
+`followRedirects => true` on a source whose API exposes a resolver endpoint —
+one that answers `/search/{id}` with a `302` to the canonical record URL — so
+`fetch()` returns the resolved record in a single call.
+
+MediaWiki caps the chain at 5 hops, and Guzzle strips the `Authorization` and
+`Cookie` headers on a cross-origin hop, so an enabled source cannot leak its
+token to another host. Responses are cached under the *requested* URL, not the
+resolved one.
 
 ## Caching
 

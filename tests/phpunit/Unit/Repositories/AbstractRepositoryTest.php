@@ -49,6 +49,29 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 		return $factory;
 	}
 
+	/**
+	 * Like newRequestFactory(), but records the options create() was called with.
+	 *
+	 * @param array|null &$captured Receives the request options.
+	 */
+	private function newCapturingRequestFactory( ?array &$captured ): HttpRequestFactory {
+		$status = $this->createMock( \StatusValue::class );
+		$status->method( 'isOK' )->willReturn( true );
+
+		$req = $this->createMock( \MWHttpRequest::class );
+		$req->method( 'execute' )->willReturn( $status );
+		$req->method( 'getContent' )->willReturn( '{}' );
+
+		$factory = $this->createMock( HttpRequestFactory::class );
+		$factory->method( 'create' )->willReturnCallback(
+			static function ( string $url, array $options = [], string $caller = '' ) use ( &$captured, $req ) {
+				$captured = $options;
+				return $req;
+			}
+		);
+		return $factory;
+	}
+
 	private function newRepo(
 		array $sourceConfig,
 		array $options,
@@ -94,6 +117,38 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 		$expected = 'ext:apiuntocache:' . sha1( 'https://api.example/Aurora' );
 		$this->assertSame( $expected, $repo->makeCacheKey() );
 		$this->assertSame( $repo->makeCacheKey(), $repo->makeCacheKey(), 'memoized' );
+	}
+
+	public function testRequestDoesNotFollowRedirectsByDefault(): void {
+		$captured = null;
+		$repo = $this->newRepo(
+			[ 'baseUrl' => 'https://api.example' ],
+			[
+				ApiuntoLuaLibrary::IDENTIFIER => 'Aurora',
+				ApiuntoLuaLibrary::QUERY_PARAMS => [],
+			],
+			$this->newCapturingRequestFactory( $captured )
+		);
+
+		$repo->getRaw();
+
+		$this->assertFalse( $captured['followRedirects'] );
+	}
+
+	public function testRequestFollowsRedirectsWhenSourceOptsIn(): void {
+		$captured = null;
+		$repo = $this->newRepo(
+			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true ],
+			[
+				ApiuntoLuaLibrary::IDENTIFIER => 'search/Aurora',
+				ApiuntoLuaLibrary::QUERY_PARAMS => [],
+			],
+			$this->newCapturingRequestFactory( $captured )
+		);
+
+		$repo->getRaw();
+
+		$this->assertTrue( $captured['followRedirects'] );
 	}
 
 	public function testRequestWithCacheDisabledHitsApiDirectly(): void {

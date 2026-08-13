@@ -37,8 +37,10 @@ abstract class AbstractRepository {
 			wfDebugLog( 'Apiunto', 'Retrieving Data from API' );
 
 			try {
+				// Opt-in per source: resolver endpoints answer with a 302 to the record.
 				$req = $this->requestFactory->create( $this->getFullUrl(), [
-					'timeout' => $this->sourceConfig['timeout'] ?? 5
+					'timeout' => $this->sourceConfig['timeout'] ?? 5,
+					'followRedirects' => $this->sourceConfig['followRedirects'] ?? false,
 				], $caller );
 				$req->setHeader( 'User-Agent', 'MediaWiki/ext-apiunto-' . MW_VERSION );
 				if ( !empty( $this->sourceConfig['token'] ) ) {
