@@ -64,16 +64,21 @@ local ships = api.fetch( 'StarCitizenWikiAPI', 'v2/vehicles', {
 
 ### Following redirects
 
-By default a redirect response is returned as-is, so a `3xx` reaches Lua as the
-upstream's redirect body rather than the record it points at. Set
+By default a `3xx` is not followed and the fetch fails, so Lua gets the usual
+error string rather than a redirect page masquerading as data. Set
 `followRedirects => true` on a source whose API exposes a resolver endpoint —
 one that answers `/search/{id}` with a `302` to the canonical record URL — so
 `fetch()` returns the resolved record in a single call.
 
-MediaWiki caps the chain at 5 hops, and Guzzle strips the `Authorization` and
-`Cookie` headers on a cross-origin hop, so an enabled source cannot leak its
-token to another host. Responses are cached under the *requested* URL, not the
-resolved one.
+Each hop is issued as its own request, capped at 3. MediaWiki's built-in
+`followRedirects` option is deliberately **not** used: `GuzzleHttpRequest`
+streams every hop into one `MWCallbackStream` sink and Guzzle's redirect
+middleware reuses that sink for the follow-up request, so `getContent()` would
+return the intermediate redirect page concatenated in front of the real payload.
+
+A source's `token` is only sent to the host configured in its `baseUrl`; a
+redirect that leaves that host drops the `Authorization` header. Responses are
+cached under the *requested* URL, not the resolved one.
 
 ## Caching
 

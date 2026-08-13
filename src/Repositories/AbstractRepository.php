@@ -13,6 +13,7 @@ use Wikimedia\ObjectCache\WANObjectCache;
 abstract class AbstractRepository {
 	public const PROP_KEY = 'apiuntocache';
 	private const DEFAULT_CACHE_DURATION = 86400;
+	private const MAX_REDIRECTS = 3;
 
 	private ?string $cacheKey = null;
 
@@ -37,22 +38,7 @@ abstract class AbstractRepository {
 			wfDebugLog( 'Apiunto', 'Retrieving Data from API' );
 
 			try {
-				// Opt-in per source: resolver endpoints answer with a 302 to the record.
-				$req = $this->requestFactory->create( $this->getFullUrl(), [
-					'timeout' => $this->sourceConfig['timeout'] ?? 5,
-					'followRedirects' => $this->sourceConfig['followRedirects'] ?? false,
-				], $caller );
-				$req->setHeader( 'User-Agent', 'MediaWiki/ext-apiunto-' . MW_VERSION );
-				if ( !empty( $this->sourceConfig['token'] ) ) {
-					$req->setHeader( 'Authorization', 'Bearer ' . $this->sourceConfig['token'] );
-				}
-				$status = $req->execute();
-
-				if ( !$status->isOK() ) {
-					return false;
-				}
-
-				return $req->getContent();
+				return $this->fetch( $caller );
 			} catch ( Exception $e ) {
 				wfLogWarning( sprintf( '[Apiunto] Error retrieving API data: %s', $e->getMessage() ) );
 				wfDebugLog( 'Apiunto', sprintf( 'Error retrieving API data: %s', $e->getMessage() ) );
@@ -92,6 +78,68 @@ abstract class AbstractRepository {
 		}
 
 		return (string)$value;
+	}
+
+	/**
+	 * Issues the HTTP request, following redirects itself when the source opts in,
+	 * and returns the final response body (or false on failure).
+	 *
+	 * MediaWiki's own `followRedirects` option cannot be used for this.
+	 * GuzzleHttpRequest streams every hop into a single MWCallbackStream sink, and
+	 * Guzzle's redirect middleware reuses that same sink for the follow-up request,
+	 * so getContent() returns the intermediate redirect page concatenated in front
+	 * of the real payload. Issuing each hop as its own request keeps the bodies
+	 * apart.
+	 *
+	 * @return string|false
+	 */
+	private function fetch( string $caller ) {
+		$url = $this->getFullUrl();
+		$maxHops = ( $this->sourceConfig['followRedirects'] ?? false ) ? self::MAX_REDIRECTS : 0;
+
+		for ( $hop = 0; ; $hop++ ) {
+			$req = $this->requestFactory->create( $url, [
+				'timeout' => $this->sourceConfig['timeout'] ?? 5,
+			], $caller );
+			$req->setHeader( 'User-Agent', 'MediaWiki/ext-apiunto-' . MW_VERSION );
+			// The token is scoped to the configured host: a redirect that leaves it
+			// must not carry the source's credentials along.
+			if ( !empty( $this->sourceConfig['token'] ) && $this->isConfiguredHost( $url ) ) {
+				$req->setHeader( 'Authorization', 'Bearer ' . $this->sourceConfig['token'] );
+			}
+
+			$status = $req->execute();
+			$code = $req->getStatus();
+
+			// A 3xx passes isOK() (only >= 400 is fatal), so it must be handled before
+			// the success branch or the redirect page would be returned as the payload.
+			if ( $code >= 300 && $code < 400 ) {
+				$next = $req->getFinalUrl();
+				if ( $hop >= $maxHops || $next === '' || $next === $url ) {
+					// A response condition, not an exception: request() turns the false
+					// into the caller-visible error string. Debug-level so a source that
+					// legitimately meets redirects doesn't flood the warning channel.
+					wfDebugLog( 'Apiunto', sprintf( 'Unfollowed redirect (%d) for %s', $code, $url ) );
+					return false;
+				}
+				$url = $next;
+				continue;
+			}
+
+			if ( !$status->isOK() ) {
+				return false;
+			}
+
+			return $req->getContent();
+		}
+	}
+
+	/**
+	 * Whether a URL is on the same host as the source's configured baseUrl.
+	 */
+	private function isConfiguredHost( string $url ): bool {
+		return parse_url( $url, PHP_URL_HOST )
+			=== parse_url( $this->sourceConfig['baseUrl'] ?? '', PHP_URL_HOST );
 	}
 
 	/**
