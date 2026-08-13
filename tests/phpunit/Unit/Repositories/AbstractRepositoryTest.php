@@ -50,23 +50,39 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 	}
 
 	/**
-	 * Like newRequestFactory(), but records the options create() was called with.
+	 * A factory that answers successive create() calls from a queue of canned
+	 * responses, recording the URL and request headers of each hop.
 	 *
-	 * @param array|null &$captured Receives the request options.
+	 * @param array[] $responses Each: [ 'code' => int, 'location' => string, 'content' => string ]
+	 * @param string[] &$urls Receives the URL of each hop, in order.
+	 * @param array[] &$headers Receives the headers set on each hop, in order.
 	 */
-	private function newCapturingRequestFactory( ?array &$captured ): HttpRequestFactory {
-		$status = $this->createMock( \StatusValue::class );
-		$status->method( 'isOK' )->willReturn( true );
+	private function newHopRequestFactory( array $responses, array &$urls, array &$headers ): HttpRequestFactory {
+		$reqs = [];
+		foreach ( $responses as $i => $response ) {
+			$code = $response['code'];
+			$status = $this->createMock( \StatusValue::class );
+			$status->method( 'isOK' )->willReturn( $code < 400 );
 
-		$req = $this->createMock( \MWHttpRequest::class );
-		$req->method( 'execute' )->willReturn( $status );
-		$req->method( 'getContent' )->willReturn( '{}' );
+			$req = $this->createMock( \MWHttpRequest::class );
+			$req->method( 'execute' )->willReturn( $status );
+			$req->method( 'getStatus' )->willReturn( $code );
+			$req->method( 'getFinalUrl' )->willReturn( $response['location'] ?? '' );
+			$req->method( 'getContent' )->willReturn( $response['content'] ?? '' );
+			$req->method( 'setHeader' )->willReturnCallback(
+				static function ( $name, $value ) use ( &$headers, $i ) {
+					$headers[$i][$name] = $value;
+				}
+			);
+			$reqs[] = $req;
+		}
 
+		$hop = 0;
 		$factory = $this->createMock( HttpRequestFactory::class );
 		$factory->method( 'create' )->willReturnCallback(
-			static function ( string $url, array $options = [], string $caller = '' ) use ( &$captured, $req ) {
-				$captured = $options;
-				return $req;
+			static function ( string $url, array $options = [], string $caller = '' ) use ( &$urls, &$hop, $reqs ) {
+				$urls[] = $url;
+				return $reqs[$hop++];
 			}
 		);
 		return $factory;
@@ -119,36 +135,124 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 		$this->assertSame( $repo->makeCacheKey(), $repo->makeCacheKey(), 'memoized' );
 	}
 
-	public function testRequestDoesNotFollowRedirectsByDefault(): void {
-		$captured = null;
-		$repo = $this->newRepo(
-			[ 'baseUrl' => 'https://api.example' ],
-			[
-				ApiuntoLuaLibrary::IDENTIFIER => 'Aurora',
-				ApiuntoLuaLibrary::QUERY_PARAMS => [],
-			],
-			$this->newCapturingRequestFactory( $captured )
-		);
-
-		$repo->getRaw();
-
-		$this->assertFalse( $captured['followRedirects'] );
-	}
-
-	public function testRequestFollowsRedirectsWhenSourceOptsIn(): void {
-		$captured = null;
-		$repo = $this->newRepo(
-			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true ],
+	/**
+	 * Caching is left enabled with a real backing store so a failed fetch surfaces
+	 * as the production error string rather than the cache-disabled empty string.
+	 */
+	private function newRedirectRepo(
+		array $sourceConfig,
+		array $responses,
+		array &$urls,
+		array &$headers
+	): RawRepository {
+		return $this->newRepo(
+			$sourceConfig,
 			[
 				ApiuntoLuaLibrary::IDENTIFIER => 'search/Aurora',
 				ApiuntoLuaLibrary::QUERY_PARAMS => [],
 			],
-			$this->newCapturingRequestFactory( $captured )
+			$this->newHopRequestFactory( $responses, $urls, $headers ),
+			$this->newRealCache(),
+			true
+		);
+	}
+
+	public function testDoesNotFollowRedirectByDefault(): void {
+		$urls = [];
+		$headers = [];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => 'https://api.example' ],
+			[ [ 'code' => 302, 'location' => 'https://api.example/ships/aurora', 'content' => '<html>go</html>' ] ],
+			$urls,
+			$headers
+		);
+
+		$this->assertSame( 'Could not retrieve API Data', $repo->getRaw() );
+		$this->assertCount( 1, $urls, 'the redirect must not be followed' );
+	}
+
+	/**
+	 * The redirect page's body must not survive into the result. MediaWiki's own
+	 * followRedirects option concatenates it in front of the payload, which is why
+	 * the hops are issued separately.
+	 */
+	public function testFollowsRedirectAndReturnsOnlyFinalBody(): void {
+		$urls = [];
+		$headers = [];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true ],
+			[
+				[ 'code' => 302, 'location' => 'https://api.example/ships/aurora', 'content' => '<html>go</html>' ],
+				[ 'code' => 200, 'content' => '{"data":{"name":"Aurora"}}' ],
+			],
+			$urls,
+			$headers
+		);
+
+		$this->assertSame( '{"data":{"name":"Aurora"}}', $repo->getRaw() );
+		$this->assertSame(
+			[ 'https://api.example/search/Aurora', 'https://api.example/ships/aurora' ],
+			$urls
+		);
+	}
+
+	public function testGivesUpAfterMaxRedirects(): void {
+		$urls = [];
+		$headers = [];
+		$hop = static fn ( int $n ) => [
+			'code' => 302,
+			'location' => 'https://api.example/hop' . $n,
+			'content' => '',
+		];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true ],
+			[ $hop( 1 ), $hop( 2 ), $hop( 3 ), $hop( 4 ), $hop( 5 ) ],
+			$urls,
+			$headers
+		);
+
+		$this->assertSame( 'Could not retrieve API Data', $repo->getRaw() );
+		$this->assertCount( 4, $urls, 'the original request plus MAX_REDIRECTS hops' );
+	}
+
+	/**
+	 * A redirect that leaves the configured host must not carry the source's token.
+	 */
+	public function testDropsTokenOnCrossHostRedirect(): void {
+		$urls = [];
+		$headers = [];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true, 'token' => 'secret' ],
+			[
+				[ 'code' => 302, 'location' => 'https://cdn.elsewhere/ships/aurora', 'content' => '' ],
+				[ 'code' => 200, 'content' => '{}' ],
+			],
+			$urls,
+			$headers
 		);
 
 		$repo->getRaw();
 
-		$this->assertTrue( $captured['followRedirects'] );
+		$this->assertSame( 'Bearer secret', $headers[0]['Authorization'] ?? null );
+		$this->assertArrayNotHasKey( 'Authorization', $headers[1] );
+	}
+
+	public function testKeepsTokenOnSameHostRedirect(): void {
+		$urls = [];
+		$headers = [];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true, 'token' => 'secret' ],
+			[
+				[ 'code' => 302, 'location' => 'https://api.example/ships/aurora', 'content' => '' ],
+				[ 'code' => 200, 'content' => '{}' ],
+			],
+			$urls,
+			$headers
+		);
+
+		$repo->getRaw();
+
+		$this->assertSame( 'Bearer secret', $headers[1]['Authorization'] ?? null );
 	}
 
 	public function testRequestWithCacheDisabledHitsApiDirectly(): void {
