@@ -24,7 +24,8 @@ class RepositoryFactory {
 	 * Build a RawRepository for one API source.
 	 *
 	 * @param string $sourceName Configured source name (a key of $wgApiuntoSources).
-	 * @param array $sourceConfig Source config (e.g. baseUrl, token, timeout, cacheDuration).
+	 * @param array $sourceConfig Source config (e.g. baseUrl, token, timeout, cacheDuration,
+	 *   followRedirects).
 	 * @param array $options Request options, keyed by ApiuntoLuaLibrary::IDENTIFIER and
 	 *   ApiuntoLuaLibrary::QUERY_PARAMS, appended to the request URL.
 	 */
