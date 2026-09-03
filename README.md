@@ -62,6 +62,9 @@ local ships = api.fetch( 'StarCitizenWikiAPI', 'v2/vehicles', {
 | `$wgApiuntoSources` | `[]` | An array of API sources. Each source accepts `baseUrl`, and optional `token`, `timeout` (seconds, default `5`), `cacheDuration` (seconds, default `86400`), and `followRedirects` (default `false`). |
 | `$wgApiuntoEnableCache` | `true` | Whether to cache API responses. |
 
+Editors can request any path on a source's host with its `token` attached, so
+only configure a token whose access every editor may have.
+
 ### Following redirects
 
 By default a `3xx` is not followed and the fetch fails, so Lua gets the usual
@@ -76,9 +79,9 @@ streams every hop into one `MWCallbackStream` sink and Guzzle's redirect
 middleware reuses that sink for the follow-up request, so `getContent()` would
 return the intermediate redirect page concatenated in front of the real payload.
 
-A source's `token` is only sent to the host configured in its `baseUrl`; a
-redirect that leaves that host drops the `Authorization` header. Responses are
-cached under the *requested* URL, not the resolved one.
+Redirects are only followed to the same scheme, host and port as the source's
+`baseUrl`; anything else fails the fetch. Responses are cached under the
+*requested* URL, not the resolved one.
 
 ## Caching
 

@@ -216,25 +216,72 @@ class AbstractRepositoryTest extends MediaWikiUnitTestCase {
 	}
 
 	/**
-	 * A redirect that leaves the configured host must not carry the source's token.
+	 * A redirect is followed only when it stays on the source's origin. Following
+	 * anything else would let the upstream, or an open redirect on it, point the
+	 * wiki at hosts the admin never configured, including internal ones, and hand
+	 * the response to Lua.
+	 *
+	 * @dataProvider provideCrossOriginRedirects
 	 */
-	public function testDropsTokenOnCrossHostRedirect(): void {
+	public function testDoesNotFollowCrossOriginRedirect( string $location ): void {
 		$urls = [];
 		$headers = [];
 		$repo = $this->newRedirectRepo(
 			[ 'baseUrl' => 'https://api.example', 'followRedirects' => true, 'token' => 'secret' ],
 			[
-				[ 'code' => 302, 'location' => 'https://cdn.elsewhere/ships/aurora', 'content' => '' ],
-				[ 'code' => 200, 'content' => '{}' ],
+				[ 'code' => 302, 'location' => $location, 'content' => '' ],
+				[ 'code' => 200, 'content' => '{"internal":true}' ],
 			],
 			$urls,
 			$headers
 		);
 
-		$repo->getRaw();
+		$this->assertSame( 'Could not retrieve API Data', $repo->getRaw() );
+		$this->assertSame(
+			[ 'https://api.example/search/Aurora' ],
+			$urls,
+			'nothing outside the configured origin is ever requested'
+		);
+	}
 
-		$this->assertSame( 'Bearer secret', $headers[0]['Authorization'] ?? null );
-		$this->assertArrayNotHasKey( 'Authorization', $headers[1] );
+	public static function provideCrossOriginRedirects(): array {
+		return [
+			'other host' => [ 'http://169.254.169.254/latest/meta-data/' ],
+			'same host, scheme downgraded' => [ 'http://api.example/ships/aurora' ],
+			'same host, other port' => [ 'https://api.example:8443/ships/aurora' ],
+			'no location' => [ '' ],
+		];
+	}
+
+	/**
+	 * The origin check must not be stricter than URL syntax: an explicit default
+	 * port and a differently-cased host name the same origin.
+	 *
+	 * @dataProvider provideSameOriginRedirects
+	 */
+	public function testFollowsRedirectWithinOrigin( string $baseUrl, string $location ): void {
+		$urls = [];
+		$headers = [];
+		$repo = $this->newRedirectRepo(
+			[ 'baseUrl' => $baseUrl, 'followRedirects' => true ],
+			[
+				[ 'code' => 302, 'location' => $location, 'content' => '' ],
+				[ 'code' => 200, 'content' => '{"ok":true}' ],
+			],
+			$urls,
+			$headers
+		);
+
+		$this->assertSame( '{"ok":true}', $repo->getRaw() );
+		$this->assertCount( 2, $urls );
+	}
+
+	public static function provideSameOriginRedirects(): array {
+		return [
+			'explicit default port in baseUrl' => [ 'https://api.example:443', 'https://api.example/ships/aurora' ],
+			'explicit default port in redirect' => [ 'https://api.example', 'https://api.example:443/ships/aurora' ],
+			'host case differs' => [ 'https://api.example', 'https://API.EXAMPLE/ships/aurora' ],
+		];
 	}
 
 	public function testKeepsTokenOnSameHostRedirect(): void {
