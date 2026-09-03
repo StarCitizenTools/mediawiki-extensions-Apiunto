@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/StarCitizenTools/mediawiki-extensions-Apiunto/compare/v3.0.0...v3.0.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* only follow redirects within the source's origin ([488b827](https://github.com/StarCitizenTools/mediawiki-extensions-Apiunto/commit/488b827dfca4603cac56a384725d283c54146fd3))
+
 ## 3.0.0 (2026-09-03)
 
 First release from [StarCitizenTools/mediawiki-extensions-Apiunto](https://github.com/StarCitizenTools/mediawiki-extensions-Apiunto), now the canonical repository. The original [StarCitizenWiki/Apiunto](https://github.com/StarCitizenWiki/Apiunto) is archived and 2.0.0 is its last release.
