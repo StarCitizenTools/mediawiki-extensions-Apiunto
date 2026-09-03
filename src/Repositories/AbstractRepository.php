@@ -14,6 +14,7 @@ abstract class AbstractRepository {
 	public const PROP_KEY = 'apiuntocache';
 	private const DEFAULT_CACHE_DURATION = 86400;
 	private const MAX_REDIRECTS = 3;
+	private const DEFAULT_PORTS = [ 'http' => 80, 'https' => 443 ];
 
 	private ?string $cacheKey = null;
 
@@ -109,8 +110,8 @@ abstract class AbstractRepository {
 	}
 
 	/**
-	 * Issues the HTTP request, following redirects itself when the source opts in,
-	 * and returns the final response body (or false on failure).
+	 * Issues the HTTP request, following redirects within the source's origin when
+	 * it opts in, and returns the final response body (or false on failure).
 	 *
 	 * MediaWiki's own `followRedirects` option cannot be used for this.
 	 * GuzzleHttpRequest streams every hop into a single MWCallbackStream sink, and
@@ -130,9 +131,9 @@ abstract class AbstractRepository {
 				'timeout' => $this->sourceConfig['timeout'] ?? 5,
 			], $caller );
 			$req->setHeader( 'User-Agent', 'MediaWiki/ext-apiunto-' . MW_VERSION );
-			// The token is scoped to the configured host: a redirect that leaves it
-			// must not carry the source's credentials along.
-			if ( !empty( $this->sourceConfig['token'] ) && $this->isConfiguredHost( $url ) ) {
+			// Every hop is on the configured origin (see isSameOrigin), so the token
+			// never travels anywhere but the host it was issued for.
+			if ( !empty( $this->sourceConfig['token'] ) ) {
 				$req->setHeader( 'Authorization', 'Bearer ' . $this->sourceConfig['token'] );
 			}
 
@@ -143,11 +144,11 @@ abstract class AbstractRepository {
 			// the success branch or the redirect page would be returned as the payload.
 			if ( $code >= 300 && $code < 400 ) {
 				$next = $req->getFinalUrl();
-				if ( $hop >= $maxHops || $next === '' || $next === $url ) {
+				if ( $hop >= $maxHops || $next === $url || !$this->isSameOrigin( $next ) ) {
 					// A response condition, not an exception: request() turns the false
 					// into the caller-visible error string. Debug-level so a source that
 					// legitimately meets redirects doesn't flood the warning channel.
-					wfDebugLog( 'Apiunto', sprintf( 'Unfollowed redirect (%d) for %s', $code, $url ) );
+					wfDebugLog( 'Apiunto', sprintf( 'Unfollowed redirect (%d) from %s to %s', $code, $url, $next ) );
 					return false;
 				}
 				$url = $next;
@@ -163,11 +164,36 @@ abstract class AbstractRepository {
 	}
 
 	/**
-	 * Whether a URL is on the same host as the source's configured baseUrl.
+	 * Whether a redirect target stays on the source's origin: the scheme, host and
+	 * port of its baseUrl.
+	 *
+	 * Anything else is refused. The upstream, or an open redirect on it, could
+	 * otherwise point the wiki at hosts the admin never configured, including
+	 * internal ones, and the body would be handed to Lua and cached. The scheme is
+	 * part of the check because an HTTPS to HTTP downgrade on the same name would
+	 * drop the certificate verification that stops a rebound hostname reaching an
+	 * internal service.
 	 */
-	private function isConfiguredHost( string $url ): bool {
-		return parse_url( $url, PHP_URL_HOST )
-			=== parse_url( $this->sourceConfig['baseUrl'] ?? '', PHP_URL_HOST );
+	private function isSameOrigin( string $url ): bool {
+		$origin = self::origin( $url );
+		return $origin !== null && $origin === self::origin( $this->sourceConfig['baseUrl'] ?? '' );
+	}
+
+	/**
+	 * Normalizes a URL to "scheme://host:port", lower-cased and with the scheme's
+	 * default port filled in, so equal origins compare equal however they are spelt.
+	 *
+	 * @return string|null Null when the URL has no scheme or host.
+	 */
+	private static function origin( string $url ): ?string {
+		$parts = parse_url( $url );
+		if ( $parts === false || !isset( $parts['scheme'] ) || !isset( $parts['host'] ) ) {
+			return null;
+		}
+		$scheme = strtolower( $parts['scheme'] );
+		$port = $parts['port'] ?? ( self::DEFAULT_PORTS[$scheme] ?? 0 );
+
+		return sprintf( '%s://%s:%d', $scheme, strtolower( $parts['host'] ), $port );
 	}
 
 	/**
